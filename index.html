@@ -1,43 +1,39 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>手势傅里叶水波交互</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fluid Zen Waves</title>
     <style>
         body {
             margin: 0;
-            overflow: hidden;
             background: #000;
-            font-family: sans-serif;
+            overflow: hidden;
+            font-family: 'Helvetica Neue', sans-serif;
         }
 
         canvas {
-            width: 100vw;
-            height: 100vh;
             display: block;
-        }
-
-        #info {
-            position: absolute;
-            top: 20px;
-            left: 20px;
-            color: white;
-            background: rgba(0,0,0,0.5);
-            padding: 10px;
-            border-radius: 8px;
-            pointer-events: none;
-            font-size: 14px;
         }
 
         video {
             display: none;
         }
+
+        #hud {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            color: rgba(255,255,255,0.5);
+            pointer-events: none;
+            font-size: 10px;
+            letter-spacing: 2px;
+        }
     </style>
 </head>
 <body>
+    <div id="hud">SYSTEM_STATUS: <span id="ui-status">CALIBRATING</span></div>
 
-    <div id="info">正在初始化摄像头和手势识别...</div>
     <video id="video" playsinline></video>
     <canvas id="canvas"></canvas>
 
@@ -46,136 +42,146 @@
 
     <script id="vs" type="x-shader/x-vertex">
         varying vec2 vUv;
-        void main() {
-            vUv = uv;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
+        void main() { vUv = uv; gl_Position = vec4(position, 1.0); }
     </script>
 
     <script id="fs" type="x-shader/x-fragment">
         precision highp float;
         varying vec2 vUv;
         uniform float time;
-        uniform float brightness; // 手部距离映射
-        uniform float frequency;  // 手部摆动频率映射
+        uniform float uCount;
+        uniform float uFreq;       // 摆动频率增量
+        uniform float uComplexity; // 波长复杂度
+        uniform float uIntensity;  // 亮度
 
         void main() {
-            vec2 uv = vUv * 2.0 - 1.0;
-            float wave = 0.0;
+            vec2 uv = vUv;
+            vec2 p = (uv - 0.5) * 2.0;
+            p.x *= 1.8;
 
-            // 模拟多个不同频率的波叠加（傅里叶合成的思想）
-            for(float i = 1.0; i < 6.0; i++) {
-                wave += sin(uv.x * i * 5.0 * frequency + time * i) * (0.2 / i);
-                wave += cos(uv.y * i * 3.0 * frequency + time * 0.5 * i) * (0.1 / i);
+            float finalOutput = 0.0;
+
+            // 基础时间步进 + 交互频率增量
+            // 即使 uFreq 为 0，波也会缓慢游动
+            float activeTime = time + uFreq;
+
+            for(float i = 1.0; i <= 10.0; i++) {
+                if(i > uCount) break;
+
+                float yOffset = (i / 11.0 - 0.5) * 1.3;
+
+                // 空间扰动保持抽象美感
+                float xDistort = p.x + sin(p.y * 1.5 + activeTime * 0.3 + i) * 0.2;
+                float yDistort = p.y - yOffset;
+
+                // 核心波动公式：这里控制了波形的形态
+                float wavePattern = sin(xDistort * (uComplexity + i * 0.2) + activeTime * 0.8 + i * 2.0);
+
+                // 让波的起伏不要太生硬，乘以 0.12 限制振幅
+                float dist = abs(yDistort - wavePattern * 0.12);
+
+                // 线条光晕渲染
+                float lineIntensity = 0.004 / (dist + 0.015);
+                finalOutput += lineIntensity * uIntensity;
             }
 
-            // 颜色计算
-            vec3 baseColor = vec3(0.1, 0.4, 0.8); // 深蓝色水底
-            vec3 highlight = vec3(0.5, 0.9, 1.0); // 亮色波峰
-
-            vec3 color = mix(baseColor, highlight, wave + 0.5);
-            color *= brightness; // 亮度受距离控制
-
-            gl_FragColor = vec4(color, 1.0);
+            // 边缘平滑压暗，增加高级感
+            float edgeFade = smoothstep(1.2, 0.4, length(p * vec2(0.6, 1.0)));
+            gl_FragColor = vec4(vec3(finalOutput * edgeFade), 1.0);
         }
     </script>
 
     <script type="module">
         import * as THREE from 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js';
 
-        const videoElement = document.getElementById('video');
-        const info = document.getElementById('info');
-        let handFrequency = 1.0;
-        let handBrightness = 1.0;
-        let lastX = 0.5;
-        let lastTime = Date.now();
+        let target = { count: 3, freq: 0, complexity: 1.2, intensity: 0.6 };
+        let current = { count: 3, freq: 0, complexity: 1.2, intensity: 0.6 };
+        let lastX = 0.5, lastTime = Date.now();
+        let totalFreqOffset = 0; // 累加频率产生的偏移，确保波动连续
 
-        // --- Three.js 初始化 ---
         const scene = new THREE.Scene();
-        const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        const camera = new THREE.Camera();
         const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas'), antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
 
-        const geometry = new THREE.PlaneGeometry(2, 2);
         const material = new THREE.ShaderMaterial({
             uniforms: {
                 time: { value: 0 },
-                brightness: { value: 1.0 },
-                frequency: { value: 1.0 }
+                uCount: { value: 3.0 },
+                uFreq: { value: 0.0 },
+                uComplexity: { value: 1.2 },
+                uIntensity: { value: 0.6 }
             },
             vertexShader: document.getElementById('vs').textContent,
-            fragmentShader: document.getElementById('fs').textContent
-        });
-        const mesh = new THREE.Mesh(geometry, material);
-        scene.add(mesh);
-
-        // --- 手势识别逻辑 ---
-        const hands = new Hands({
-            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            fragmentShader: document.getElementById('fs').textContent,
+            blending: THREE.AdditiveBlending,
+            transparent: true
         });
 
-        hands.setOptions({
-            maxNumHands: 1,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
-        });
+        scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material));
+
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5 });
 
         hands.onResults((results) => {
+            const statusEl = document.getElementById('ui-status');
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusEl.innerText = "ACTIVE_TRACKING";
                 const hand = results.multiHandLandmarks[0];
+                const dist = Math.hypot(hand[8].x - hand[0].x, hand[8].y - hand[0].y);
 
-                // 1. 亮度映射：利用食指指尖(8)和手掌根部(0)的相对大小来估算距离
-                // 在2D画面中，手掌占比越大，认为离摄像头越近
-                const dx = hand[8].x - hand[0].x;
-                const dy = hand[8].y - hand[0].y;
-                const distance = Math.sqrt(dx*dx + dy*dy);
-                // 距离感应：通常 0.1(远) 到 0.5(近)，映射到亮度
-                handBrightness = THREE.MathUtils.mapLinear(distance, 0.1, 0.5, 0.2, 2.5);
+                // 距离映射：数量 (1-10)
+                target.count = THREE.MathUtils.mapLinear(dist, 0.08, 0.4, 1.5, 10.0);
+                target.intensity = THREE.MathUtils.mapLinear(dist, 0.08, 0.4, 0.4, 1.8);
 
-                // 2. 频率映射：计算水平移动速度
-                const currentX = hand[9].x; // 中指根部
-                const currentTime = Date.now();
-                const deltaX = Math.abs(currentX - lastX);
-                const deltaTime = (currentTime - lastTime) / 1000;
+                // 速度映射：通过开方处理减少抖动，让反应更沉稳
+                const currX = hand[9].x;
+                const dt = (Date.now() - lastTime) / 1000;
+                const rawSpeed = Math.abs(currX - lastX) / dt;
 
-                if(deltaTime > 0) {
-                    const speed = deltaX / deltaTime;
-                    // 平滑处理频率变化
-                    handFrequency = handFrequency * 0.9 + (1.0 + speed * 2.0) * 0.1;
-                }
+                // 使用 Math.sqrt(rawSpeed) 让速度增加变得平滑
+                target.freq = Math.sqrt(rawSpeed) * 0.5;
+                target.complexity = 1.2 + Math.sqrt(rawSpeed) * 1.5;
 
-                lastX = currentX;
-                lastTime = currentTime;
-                info.innerText = "手势已锁定：挥动改变频率，靠近增强亮度";
+                lastX = currX;
+                lastTime = Date.now();
             } else {
-                info.innerText = "未检测到手部";
-                handBrightness *= 0.95; // 失去目标时缓慢变暗
+                statusEl.innerText = "STANDBY";
+                target.count = 2.0;
+                target.freq = 0.0;
+                target.complexity = 1.0;
+                target.intensity = 0.4;
             }
         });
 
-        const cameraTracker = new Camera(videoElement, {
-            onFrame: async () => {
-                await hands.send({ image: videoElement });
-            },
-            width: 640,
-            height: 480
-        });
-        cameraTracker.start();
+        new Camera(document.getElementById('video'), {
+            onFrame: async () => { await hands.send({ image: document.getElementById('video') }); },
+            width: 640, height: 480
+        }).start();
 
-        // --- 渲染循环 ---
         function animate() {
             requestAnimationFrame(animate);
-            material.uniforms.time.value += 0.02;
-            material.uniforms.brightness.value = handBrightness;
-            material.uniforms.frequency.value = handFrequency;
+
+            // 极慢的插值系数，确保即使手部抖动，视觉上也是平滑流动的
+            const lerpStep = 0.04;
+            current.count = THREE.MathUtils.lerp(current.count, target.count, lerpStep);
+            current.intensity = THREE.MathUtils.lerp(current.intensity, target.intensity, lerpStep);
+            current.complexity = THREE.MathUtils.lerp(current.complexity, target.complexity, lerpStep);
+
+            // 频率增量的平滑
+            current.freq = THREE.MathUtils.lerp(current.freq, target.freq, lerpStep);
+            // 累加时间，使基础波动始终存在
+            totalFreqOffset += current.freq * 0.2;
+
+            material.uniforms.time.value += 0.01; // 基础慢速
+            material.uniforms.uFreq.value = totalFreqOffset; // 加上手部贡献的偏移
+            material.uniforms.uCount.value = current.count;
+            material.uniforms.uComplexity.value = current.complexity;
+            material.uniforms.uIntensity.value = current.intensity;
+
             renderer.render(scene, camera);
         }
         animate();
-
-        window.addEventListener('resize', () => {
-            renderer.setSize(window.innerWidth, window.innerHeight);
-        });
     </script>
 </body>
 </html>
